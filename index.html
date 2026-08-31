@@ -138,6 +138,8 @@ function extractJsonObject(text) {
   return JSON.parse(jsonStr);
 }
 const MISSING_GEMINI_KEY = "MISSING_GEMINI_KEY";
+const MISSING_OPENROUTER_KEY = "MISSING_OPENROUTER_KEY";
+const BOTH_PROVIDERS_FAILED = "BOTH_PROVIDERS_FAILED";
 function getGeminiKey() {
   try {
     const raw = localStorage.getItem("bitacora:profile");
@@ -148,10 +150,25 @@ function getGeminiKey() {
     return "";
   }
 }
+function getOpenRouterKey() {
+  try {
+    const raw = localStorage.getItem("bitacora:profile");
+    if (!raw) return "";
+    const p = JSON.parse(raw);
+    return (p.openRouterApiKey || "").trim();
+  } catch (e) {
+    return "";
+  }
+}
 function extractGeminiText(data) {
   const parts = data && data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts || [];
   const text = parts.map((p) => p.text || "").join("");
   if (!text) throw new Error("Respuesta vacia de Gemini");
+  return text;
+}
+function extractOpenRouterText(data) {
+  const text = data && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
+  if (!text) throw new Error("Respuesta vacia de OpenRouter");
   return text;
 }
 async function callGemini(parts) {
@@ -170,8 +187,41 @@ async function callGemini(parts) {
   }
   return data;
 }
-function parseMealResponse(data) {
-  const text = extractGeminiText(data);
+async function callOpenRouter(content) {
+  const apiKey = getOpenRouterKey();
+  if (!apiKey) throw new Error(MISSING_OPENROUTER_KEY);
+  const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: "Bearer " + apiKey
+    },
+    body: JSON.stringify({
+      model: "openrouter/free",
+      messages: [{ role: "user", content }]
+    })
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    const msg = data && data.error && data.error.message || "Fallo la conexion con OpenRouter";
+    throw new Error(msg);
+  }
+  return data;
+}
+async function callAIWithFallback(geminiFn, openRouterFn) {
+  try {
+    return await geminiFn();
+  } catch (geminiErr) {
+    const orKey = getOpenRouterKey();
+    if (!orKey) throw geminiErr;
+    try {
+      return await openRouterFn();
+    } catch (orErr) {
+      throw new Error(BOTH_PROVIDERS_FAILED);
+    }
+  }
+}
+function parseMealItemsFromText(text) {
   const parsed = extractJsonObject(text);
   const items = (parsed.items || []).map((it, i) => ({
     id: Date.now().toString() + "-" + i,
@@ -186,7 +236,7 @@ async function withRetry(fn, retries = 1) {
   try {
     return await fn();
   } catch (err) {
-    if (err.message === MISSING_GEMINI_KEY) throw err;
+    if (err.message === MISSING_GEMINI_KEY || err.message === MISSING_OPENROUTER_KEY) throw err;
     if (retries > 0) return withRetry(fn, retries - 1);
     throw err;
   }
@@ -194,20 +244,35 @@ async function withRetry(fn, retries = 1) {
 const MEAL_JSON_SPEC = 'Respond\xE9 SOLO con un JSON v\xE1lido, sin texto adicional, sin markdown ni backticks, exactamente con este formato: {"meal_name":"nombre corto del plato","items":[{"name":"alimento","qty":"cantidad estimada","calories":numero,"protein":numero}]}. Los numeros son kcal y gramos de prote\xEDna, sin unidades ni texto. Desglos\xE1 en varios items cuando haya varios alimentos distintos.';
 async function estimateMealFromImage(base64, mediaType) {
   const prompt = 'Sos un nutricionista. Mir\xE1 la foto de esta comida e identific\xE1 cada alimento por separado con su cantidad estimada (en unidades para cosas contables como huevos, o en gramos para el resto, ej: "2 huevos", "80 g ricota", "1 banana"). Para cada alimento estim\xE1 calor\xEDas y prote\xEDna de esa cantidad. ' + MEAL_JSON_SPEC + ' Si no reconoc\xE9s comida en la imagen, respond\xE9 {"meal_name":"No identificado","items":[]}.';
-  return withRetry(async () => {
-    const data = await callGemini([
-      { text: prompt },
-      { inline_data: { mime_type: mediaType, data: base64 } }
-    ]);
-    return parseMealResponse(data);
-  });
+  return callAIWithFallback(
+    () => withRetry(async () => {
+      const data = await callGemini([
+        { text: prompt },
+        { inline_data: { mime_type: mediaType, data: base64 } }
+      ]);
+      return parseMealItemsFromText(extractGeminiText(data));
+    }),
+    () => withRetry(async () => {
+      const data = await callOpenRouter([
+        { type: "text", text: prompt },
+        { type: "image_url", image_url: { url: `data:${mediaType};base64,${base64}` } }
+      ]);
+      return parseMealItemsFromText(extractOpenRouterText(data));
+    })
+  );
 }
 async function estimateMealFromText(text) {
   const prompt = 'Sos un nutricionista. El usuario te describe en texto libre, en espa\xF1ol y de forma abreviada, lo que comi\xF3 (ej: "Desayuno 4 huevos 100 gr de ricota"). Separ\xE1 cada alimento distinto que menciona con su cantidad tal como la escribi\xF3 (si no da cantidad, estim\xE1 una porci\xF3n t\xEDpica), y para cada uno estim\xE1 calor\xEDas y prote\xEDna. ' + MEAL_JSON_SPEC + ` El "meal_name" debe ser el nombre de la comida si lo menciona (ej. Desayuno, Almuerzo) o un nombre corto gen\xE9rico si no lo dice. Si el texto no describe comida reconocible, respond\xE9 {"meal_name":"No identificado","items":[]}. Texto del usuario: "${text}"`;
-  return withRetry(async () => {
-    const data = await callGemini([{ text: prompt }]);
-    return parseMealResponse(data);
-  });
+  return callAIWithFallback(
+    () => withRetry(async () => {
+      const data = await callGemini([{ text: prompt }]);
+      return parseMealItemsFromText(extractGeminiText(data));
+    }),
+    () => withRetry(async () => {
+      const data = await callOpenRouter(prompt);
+      return parseMealItemsFromText(extractOpenRouterText(data));
+    })
+  );
 }
 const TRAININGS = [
   "Pecho",
@@ -268,13 +333,20 @@ const MEASUREMENT_FIELDS = [
 const DEFAULT_MEASUREMENTS = {};
 async function getAITrainingSuggestion({ weekdayLabel, plannedText, recentContext, trainingContext }) {
   const prompt = `Sos un entrenador personal breve y directo. Hoy es ${weekdayLabel}. Contexto general del usuario (cargas de referencia, progresiones y antecedentes relevantes, priorizalo siempre): ${trainingContext || "sin datos"}. El plan planificado para hoy es: ${plannedText || "sin ejercicios cargados"}. Estos son los \xFAltimos registros de entrenamiento y notas del usuario (m\xE1s reciente primero): ${recentContext || "sin registros recientes"}. Con esa informaci\xF3n dale una recomendaci\xF3n breve (m\xE1ximo 3-4 l\xEDneas, texto plano sin JSON ni markdown) sobre si conviene seguir el plan tal cual, ajustar peso o volumen, o cambiar alg\xFAn ejercicio puntual, y por qu\xE9. Si hay alg\xFAn antecedente de lesi\xF3n o molestia en el contexto, respetalo siempre y no sugieras apurar cargas en esa zona. S\xE9 concreto.`;
-  return withRetry(async () => {
-    const data = await callGemini([{ text: prompt }]);
-    return extractGeminiText(data).trim();
-  });
+  return callAIWithFallback(
+    () => withRetry(async () => {
+      const data = await callGemini([{ text: prompt }]);
+      return extractGeminiText(data).trim();
+    }),
+    () => withRetry(async () => {
+      const data = await callOpenRouter(prompt);
+      return extractOpenRouterText(data).trim();
+    })
+  );
 }
 const DEFAULT_PROFILE = {
   geminiApiKey: "",
+  openRouterApiKey: "",
   heightCm: 170,
   age: 30,
   sex: "male",
@@ -778,7 +850,7 @@ function EntryForm({
     } catch (err) {
       console.error("Error analizando foto de comida:", err);
       setPhotoError(
-        err.message === "MISSING_GEMINI_KEY" ? "Falta tu clave de API de Gemini (gratis). Cargala en Objetivos." : "No pudimos analizar la foto. Prob\xE1 de nuevo o cargala manual."
+        err.message === "MISSING_GEMINI_KEY" ? "Falta tu clave de API de Gemini (gratis). Cargala en Objetivos." : err.message === "BOTH_PROVIDERS_FAILED" ? "Ni Gemini ni OpenRouter respondieron ahora. Prob\xE1 de nuevo en un momento." : "No pudimos analizar la foto. Prob\xE1 de nuevo o cargala manual."
       );
     } finally {
       setAnalyzing(false);
@@ -803,7 +875,7 @@ function EntryForm({
     } catch (err) {
       console.error("Error analizando texto de comida:", err);
       setPhotoError(
-        err.message === "MISSING_GEMINI_KEY" ? "Falta tu clave de API de Gemini (gratis). Cargala en Objetivos." : "No pudimos analizar el texto. Prob\xE1 de nuevo en un momento."
+        err.message === "MISSING_GEMINI_KEY" ? "Falta tu clave de API de Gemini (gratis). Cargala en Objetivos." : err.message === "BOTH_PROVIDERS_FAILED" ? "Ni Gemini ni OpenRouter respondieron ahora. Prob\xE1 de nuevo en un momento." : "No pudimos analizar el texto. Prob\xE1 de nuevo en un momento."
       );
     } finally {
       setAnalyzing(false);
@@ -970,7 +1042,7 @@ function EntryForm({
     } catch (err) {
       console.error("Error pidiendo sugerencia IA:", err);
       setAiError(
-        err.message === "MISSING_GEMINI_KEY" ? "Falta tu clave de API de Gemini (gratis). Cargala en Objetivos." : "No pudimos obtener la sugerencia ahora. Prob\xE1 de nuevo en un momento."
+        err.message === "MISSING_GEMINI_KEY" ? "Falta tu clave de API de Gemini (gratis). Cargala en Objetivos." : err.message === "BOTH_PROVIDERS_FAILED" ? "Ni Gemini ni OpenRouter respondieron ahora. Prob\xE1 de nuevo en un momento." : "No pudimos obtener la sugerencia ahora. Prob\xE1 de nuevo en un momento."
       );
     } finally {
       setAiLoading(false);
@@ -1477,7 +1549,15 @@ function ProfileSheet({ profile, onClose, onSave }) {
       value: p.geminiApiKey,
       onChange: (e) => set("geminiApiKey", e.target.value)
     }
-  ), /* @__PURE__ */ React.createElement("span", { className: "field-hint" }, "Necesaria para Foto/Texto r\xE1pido de comidas y la Sugerencia IA de entrenamiento. Conseguila gratis en aistudio.google.com/apikey (con cualquier cuenta de Google, sin tarjeta). Se guarda solo en este tel\xE9fono, nunca sale de ac\xE1 salvo para llamar a Gemini directamente.")), /* @__PURE__ */ React.createElement("div", { className: "field-row" }, /* @__PURE__ */ React.createElement("label", { className: "field" }, /* @__PURE__ */ React.createElement("span", { className: "field-label" }, "Altura (cm)"), /* @__PURE__ */ React.createElement(
+  ), /* @__PURE__ */ React.createElement("span", { className: "field-hint" }, "Necesaria para Foto/Texto r\xE1pido de comidas y la Sugerencia IA de entrenamiento. Conseguila gratis en aistudio.google.com/apikey (con cualquier cuenta de Google, sin tarjeta). Se guarda solo en este tel\xE9fono, nunca sale de ac\xE1 salvo para llamar a Gemini directamente.")), /* @__PURE__ */ React.createElement("label", { className: "field" }, /* @__PURE__ */ React.createElement("span", { className: "field-label" }, "Clave de API de OpenRouter (respaldo, opcional)"), /* @__PURE__ */ React.createElement(
+    "input",
+    {
+      type: "password",
+      placeholder: "Peg\xE1 tu clave ac\xE1",
+      value: p.openRouterApiKey,
+      onChange: (e) => set("openRouterApiKey", e.target.value)
+    }
+  ), /* @__PURE__ */ React.createElement("span", { className: "field-hint" }, "Opcional. Si Gemini falla (por ejemplo por l\xEDmite de uso), la app reintenta sola con OpenRouter antes de mostrarte un error. Conseguila gratis en openrouter.ai \u2192 Keys, con cualquier cuenta, sin tarjeta.")), /* @__PURE__ */ React.createElement("div", { className: "field-row" }, /* @__PURE__ */ React.createElement("label", { className: "field" }, /* @__PURE__ */ React.createElement("span", { className: "field-label" }, "Altura (cm)"), /* @__PURE__ */ React.createElement(
     "input",
     {
       inputMode: "numeric",
