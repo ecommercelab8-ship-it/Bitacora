@@ -331,6 +331,44 @@ const MEASUREMENT_FIELDS = [
   { key: "glutes", label: "Gl\xFAteos", icon: "\u{1F351}", good: "up" }
 ];
 const DEFAULT_MEASUREMENTS = {};
+const DEFAULT_CYCLE = { periodDates: [], cycleLength: 28, lutealLength: 14 };
+function computeCycleStatus(periodDates, cycleLength, lutealLength) {
+  if (!periodDates || periodDates.length === 0) return null;
+  const sorted = [...periodDates].sort();
+  const lastStart = sorted[sorted.length - 1];
+  const dayOfCycle = daysBetween(lastStart, todayISO()) + 1;
+  const ovulationDay = Math.max(1, cycleLength - lutealLength);
+  let phase;
+  if (dayOfCycle <= 5) phase = "Menstrual";
+  else if (dayOfCycle < ovulationDay - 1) phase = "Folicular";
+  else if (dayOfCycle <= ovulationDay + 1) phase = "Ovulaci\xF3n";
+  else if (dayOfCycle <= cycleLength) phase = "L\xFAtea";
+  else phase = "Atrasada";
+  const daysUntilNext = cycleLength - dayOfCycle + 1;
+  let avgCycleLength = null;
+  if (sorted.length >= 2) {
+    const diffs = [];
+    for (let i = 1; i < sorted.length; i++) diffs.push(daysBetween(sorted[i - 1], sorted[i]));
+    avgCycleLength = Math.round(diffs.reduce((a, b) => a + b, 0) / diffs.length);
+  }
+  return { dayOfCycle, phase, daysUntilNext, ovulationDay, lastStart, avgCycleLength };
+}
+function cyclePhaseTip(phase) {
+  switch (phase) {
+    case "Menstrual":
+      return "Es com\xFAn tener menos energ\xEDa estos d\xEDas. Escuch\xE1 a tu cuerpo con el volumen de entrenamiento.";
+    case "Folicular":
+      return "La energ\xEDa y la fuerza suelen ir en aumento \u2014 buen momento para cargas m\xE1s altas.";
+    case "Ovulaci\xF3n":
+      return "Muchas personas sienten un pico de energ\xEDa y rendimiento en estos d\xEDas.";
+    case "L\xFAtea":
+      return "Es com\xFAn m\xE1s fatiga, antojos o hinchaz\xF3n. El metabolismo basal puede subir levemente.";
+    case "Atrasada":
+      return "El ciclo super\xF3 la duraci\xF3n esperada. Puede variar mes a mes \u2014 no es necesariamente una se\xF1al de algo puntual.";
+    default:
+      return "";
+  }
+}
 async function getAITrainingSuggestion({ weekdayLabel, plannedText, recentContext, trainingContext }) {
   const prompt = `Sos un entrenador personal breve y directo. Hoy es ${weekdayLabel}. Contexto general del usuario (cargas de referencia, progresiones y antecedentes relevantes, priorizalo siempre): ${trainingContext || "sin datos"}. El plan planificado para hoy es: ${plannedText || "sin ejercicios cargados"}. Estos son los \xFAltimos registros de entrenamiento y notas del usuario (m\xE1s reciente primero): ${recentContext || "sin registros recientes"}. Con esa informaci\xF3n dale una recomendaci\xF3n breve (m\xE1ximo 3-4 l\xEDneas, texto plano sin JSON ni markdown) sobre si conviene seguir el plan tal cual, ajustar peso o volumen, o cambiar alg\xFAn ejercicio puntual, y por qu\xE9. Si hay alg\xFAn antecedente de lesi\xF3n o molestia en el contexto, respetalo siempre y no sugieras apurar cargas en esa zona. S\xE9 concreto.`;
   return callAIWithFallback(
@@ -417,6 +455,7 @@ function App() {
   const [profile, setProfile] = useState(DEFAULT_PROFILE);
   const [weeklyPlan, setWeeklyPlan] = useState(DEFAULT_PLAN);
   const [measurements, setMeasurements] = useState(DEFAULT_MEASUREMENTS);
+  const [cycleData, setCycleData] = useState(DEFAULT_CYCLE);
   const [tab, setTab] = useState("hoy");
   const [editingDate, setEditingDate] = useState(todayISO());
   const [showProfile, setShowProfile] = useState(false);
@@ -451,6 +490,11 @@ function App() {
       try {
         const m = await window.storage.get("measurements", false);
         if (m && m.value) setMeasurements(JSON.parse(m.value));
+      } catch (err) {
+      }
+      try {
+        const cy = await window.storage.get("cycle-data", false);
+        if (cy && cy.value) setCycleData({ ...DEFAULT_CYCLE, ...JSON.parse(cy.value) });
       } catch (err) {
       }
       setLoading(false);
@@ -542,6 +586,14 @@ function App() {
       console.error("No se pudieron guardar las medidas", err);
     }
   }
+  async function persistCycleData(next) {
+    setCycleData(next);
+    try {
+      await window.storage.set("cycle-data", JSON.stringify(next), false);
+    } catch (err) {
+      console.error("No se pudo guardar el ciclo", err);
+    }
+  }
   function saveEntry() {
     const hasMeals = form.meals.length > 0;
     const totalCalories = form.meals.reduce(
@@ -585,14 +637,26 @@ function App() {
     return withWeight.length ? entries[withWeight[withWeight.length - 1]].weight : profile.targetWeight;
   }, [sortedDates, entries, profile.targetWeight]);
   const chartData = useMemo(() => {
-    const withWeight = sortedDates.filter((d) => entries[d].weight != null).map((d) => ({ date: d, weight: entries[d].weight }));
+    const withWeight = sortedDates.filter((d) => entries[d].weight != null).map((d) => ({ date: d, value: entries[d].weight }));
     return withWeight.map((pt, i) => {
       const windowSlice = withWeight.slice(Math.max(0, i - 6), i + 1);
-      const avg = windowSlice.reduce((s, p) => s + p.weight, 0) / windowSlice.length;
+      const avg = windowSlice.reduce((s, p) => s + p.value, 0) / windowSlice.length;
       return {
         label: shortDate(pt.date),
-        peso: pt.weight,
-        tendencia: Math.round(avg * 100) / 100
+        value: pt.value,
+        avg: Math.round(avg * 100) / 100
+      };
+    });
+  }, [sortedDates, entries]);
+  const stepsChartData = useMemo(() => {
+    const withSteps = sortedDates.filter((d) => entries[d].steps != null).map((d) => ({ date: d, value: entries[d].steps }));
+    return withSteps.map((pt, i) => {
+      const windowSlice = withSteps.slice(Math.max(0, i - 6), i + 1);
+      const avg = windowSlice.reduce((s, p) => s + p.value, 0) / windowSlice.length;
+      return {
+        label: shortDate(pt.date),
+        value: pt.value,
+        avg: Math.round(avg)
       };
     });
   }, [sortedDates, entries]);
@@ -719,6 +783,10 @@ function App() {
       weekdayLabel: ((_a = DAYS_DISPLAY.find((d) => d.key === weekdayKeyFromISO(editingDate))) == null ? void 0 : _a.label) || "",
       recentContext: buildRecentContext(sortedDates, entries, editingDate),
       trainingContext: profile.trainingContext,
+      cyclePhaseInfo: profile.sex === "female" ? (() => {
+        const cs = computeCycleStatus(cycleData.periodDates, cycleData.cycleLength, cycleData.lutealLength);
+        return cs ? `Fase actual del ciclo menstrual: ${cs.phase} (d\xEDa ${cs.dayOfCycle}).` : "";
+      })() : "",
       profile,
       fallbackWeight: lastKnownWeight
     }
@@ -728,6 +796,9 @@ function App() {
       stats,
       profile,
       chartData,
+      stepsChartData,
+      sortedDates,
+      entries,
       recommendations
     }
   ), tab === "historial" && /* @__PURE__ */ React.createElement(
@@ -743,7 +814,7 @@ function App() {
       },
       onDelete: (d) => setConfirmDelete(d)
     }
-  ), tab === "plan" && /* @__PURE__ */ React.createElement(PlanTab, { weeklyPlan, onSave: persistPlan }), tab === "medidas" && /* @__PURE__ */ React.createElement(MeasurementsTab, { measurements, onSave: persistMeasurements }), /* @__PURE__ */ React.createElement("nav", { className: "tabbar" }, /* @__PURE__ */ React.createElement(
+  ), tab === "plan" && /* @__PURE__ */ React.createElement(PlanTab, { weeklyPlan, onSave: persistPlan }), tab === "medidas" && /* @__PURE__ */ React.createElement(MeasurementsTab, { measurements, onSave: persistMeasurements }), tab === "ciclo" && profile.sex === "female" && /* @__PURE__ */ React.createElement(CycleTab, { cycleData, onSave: persistCycleData }), /* @__PURE__ */ React.createElement("nav", { className: "tabbar" }, /* @__PURE__ */ React.createElement(
     TabBtn,
     {
       active: tab === "hoy",
@@ -766,6 +837,14 @@ function App() {
       onClick: () => setTab("medidas"),
       icon: /* @__PURE__ */ React.createElement(Ruler, { size: 20 }),
       label: "Medidas"
+    }
+  ), profile.sex === "female" && /* @__PURE__ */ React.createElement(
+    TabBtn,
+    {
+      active: tab === "ciclo",
+      onClick: () => setTab("ciclo"),
+      icon: /* @__PURE__ */ React.createElement("span", { style: { fontSize: 20, lineHeight: 1 } }, "\u{1F319}"),
+      label: "Ciclo"
     }
   ), /* @__PURE__ */ React.createElement(
     TabBtn,
@@ -810,6 +889,7 @@ function EntryForm({
   weekdayLabel,
   recentContext,
   trainingContext,
+  cyclePhaseInfo,
   profile,
   fallbackWeight
 }) {
@@ -1036,7 +1116,7 @@ function EntryForm({
         weekdayLabel,
         plannedText: planHasExercises ? planSummary : (todaysPlan == null ? void 0 : todaysPlan.restDay) ? "descanso" : "sin plan cargado",
         recentContext,
-        trainingContext
+        trainingContext: [trainingContext, cyclePhaseInfo].filter(Boolean).join(" ")
       });
       setAiSuggestion(text);
     } catch (err) {
@@ -1429,18 +1509,70 @@ function MeasurementChanges({ sortedDates, measurements }) {
     return /* @__PURE__ */ React.createElement("div", { className: "change-row", key: f.key }, /* @__PURE__ */ React.createElement("span", null, f.icon, " ", f.label), /* @__PURE__ */ React.createElement("span", { className: diffIsGood(diff, f.good) ? "good" : diff === 0 ? "" : "bad" }, diff === 0 ? "=" : diff > 0 ? `+${diff} cm` : `${diff} cm`));
   })), sortedDates.length >= 3 && first.date !== prev.date && /* @__PURE__ */ React.createElement("div", { className: "measure-total-note" }, "Desde el primer registro (", shortDate(first.date), "): abdomen", " ", first.abdomen != null && last.abdomen != null ? `${Math.round((last.abdomen - first.abdomen) * 10) / 10} cm` : "sin datos", "."));
 }
+function CycleTab({ cycleData, onSave }) {
+  const [data, setData] = useState(cycleData);
+  const [newPeriodDate, setNewPeriodDate] = useState(todayISO());
+  const [savedFlash, setSavedFlash] = useState(false);
+  const status = computeCycleStatus(data.periodDates, data.cycleLength, data.lutealLength);
+  const sortedPeriods = [...data.periodDates].sort().reverse();
+  function logPeriodStart() {
+    if (data.periodDates.includes(newPeriodDate)) return;
+    const next = { ...data, periodDates: [...data.periodDates, newPeriodDate].sort() };
+    setData(next);
+    onSave(next);
+  }
+  function removePeriod(d) {
+    const next = { ...data, periodDates: data.periodDates.filter((x) => x !== d) };
+    setData(next);
+    onSave(next);
+  }
+  function updateSetting(key, value) {
+    setData((prev) => ({ ...prev, [key]: value }));
+  }
+  function saveSettings() {
+    onSave(data);
+    setSavedFlash(true);
+    setTimeout(() => setSavedFlash(false), 1500);
+  }
+  return /* @__PURE__ */ React.createElement("main", { className: "content" }, status ? /* @__PURE__ */ React.createElement("div", { className: "card cycle-status-card" }, /* @__PURE__ */ React.createElement("div", { className: "cycle-day-big" }, "D\xEDa ", status.dayOfCycle), /* @__PURE__ */ React.createElement("div", { className: "cycle-phase-badge phase-" + status.phase }, status.phase), /* @__PURE__ */ React.createElement("div", { className: "cycle-sub-info" }, status.daysUntilNext > 0 ? `Pr\xF3ximo per\xEDodo estimado en ${status.daysUntilNext} d\xEDa${status.daysUntilNext === 1 ? "" : "s"}` : "El ciclo ya super\xF3 la duraci\xF3n esperada configurada"), status.avgCycleLength && /* @__PURE__ */ React.createElement("div", { className: "cycle-sub-info" }, "Duraci\xF3n promedio real (seg\xFAn tu historial): ", status.avgCycleLength, " d\xEDas"), /* @__PURE__ */ React.createElement("div", { className: "cycle-tip" }, cyclePhaseTip(status.phase))) : /* @__PURE__ */ React.createElement("div", { className: "card empty-card" }, /* @__PURE__ */ React.createElement("p", null, "Registr\xE1 el inicio de tu \xFAltimo per\xEDodo para empezar a ver tu fase actual del ciclo.")), /* @__PURE__ */ React.createElement("div", { className: "card" }, /* @__PURE__ */ React.createElement("span", { className: "field-label" }, "Registrar inicio de per\xEDodo"), /* @__PURE__ */ React.createElement("div", { className: "date-row" }, /* @__PURE__ */ React.createElement(
+    "input",
+    {
+      type: "date",
+      value: newPeriodDate,
+      max: todayISO(),
+      onChange: (e) => setNewPeriodDate(e.target.value),
+      className: "date-input"
+    }
+  )), /* @__PURE__ */ React.createElement("button", { className: "save-btn", onClick: logPeriodStart }, "Registrar")), /* @__PURE__ */ React.createElement("div", { className: "card" }, /* @__PURE__ */ React.createElement("span", { className: "field-label" }, "Configuraci\xF3n"), /* @__PURE__ */ React.createElement("div", { className: "field-row" }, /* @__PURE__ */ React.createElement("label", { className: "field" }, /* @__PURE__ */ React.createElement("span", { className: "field-label" }, "Duraci\xF3n del ciclo (d\xEDas)"), /* @__PURE__ */ React.createElement(
+    "input",
+    {
+      inputMode: "numeric",
+      value: data.cycleLength,
+      onChange: (e) => updateSetting("cycleLength", parseInt(e.target.value, 10) || 28)
+    }
+  )), /* @__PURE__ */ React.createElement("label", { className: "field" }, /* @__PURE__ */ React.createElement("span", { className: "field-label" }, "Fase l\xFAtea (d\xEDas)"), /* @__PURE__ */ React.createElement(
+    "input",
+    {
+      inputMode: "numeric",
+      value: data.lutealLength,
+      onChange: (e) => updateSetting("lutealLength", parseInt(e.target.value, 10) || 14)
+    }
+  ))), /* @__PURE__ */ React.createElement("span", { className: "field-hint" }, "La fase l\xFAtea suele mantenerse bastante constante (~12-14 d\xEDas) aunque la duraci\xF3n total de tu ciclo var\xEDe mes a mes."), /* @__PURE__ */ React.createElement("button", { className: "save-btn small", onClick: saveSettings }, savedFlash ? "Guardado \u2713" : "Guardar configuraci\xF3n")), sortedPeriods.length > 0 && /* @__PURE__ */ React.createElement("div", { className: "card" }, /* @__PURE__ */ React.createElement("span", { className: "field-label" }, "Historial de per\xEDodos"), /* @__PURE__ */ React.createElement("div", { className: "measure-history" }, sortedPeriods.map((d) => /* @__PURE__ */ React.createElement("div", { className: "measure-row", key: d }, /* @__PURE__ */ React.createElement("div", { className: "measure-row-head" }, /* @__PURE__ */ React.createElement("span", { className: "history-date" }, shortDate(d)), /* @__PURE__ */ React.createElement("button", { className: "icon-btn danger", onClick: () => removePeriod(d) }, /* @__PURE__ */ React.createElement(X, { size: 13 }))))))), /* @__PURE__ */ React.createElement("div", { className: "card empty-card" }, /* @__PURE__ */ React.createElement("p", null, "Esto es una estimaci\xF3n basada en promedios, no un diagn\xF3stico m\xE9dico. Si tu ciclo es muy irregular o ten\xE9s dudas sobre tu salud, consult\xE1 a un profesional.")));
+}
 function StatCard({ label, value, sub, tone }) {
   return /* @__PURE__ */ React.createElement("div", { className: "stat-card" + (tone ? " tone-" + tone : "") }, /* @__PURE__ */ React.createElement("div", { className: "stat-value" }, value), /* @__PURE__ */ React.createElement("div", { className: "stat-label" }, label), sub && /* @__PURE__ */ React.createElement("div", { className: "stat-sub" }, sub));
 }
-function WeightTrendChart({ data }) {
+function TrendChart({ data, color }) {
   const W = 320, H = 160, PAD = 24;
-  const values = data.flatMap((d) => [d.peso, d.tendencia]);
-  const min = Math.min(...values) - 0.5;
-  const max = Math.max(...values) + 0.5;
+  const values = data.flatMap((d) => [d.value, d.avg]);
+  const span = Math.max(...values) - Math.min(...values);
+  const pad = span > 0 ? span * 0.08 : Math.max(1, Math.abs(Math.min(...values)) * 0.05);
+  const min = Math.min(...values) - pad;
+  const max = Math.max(...values) + pad;
   const x = (i) => PAD + i * (W - PAD * 2) / Math.max(data.length - 1, 1);
   const y = (v) => H - PAD - (v - min) * (H - PAD * 2) / Math.max(max - min, 0.01);
-  const pesoPath = data.map((d, i) => `${i === 0 ? "M" : "L"} ${x(i)} ${y(d.peso)}`).join(" ");
-  const tendPath = data.map((d, i) => `${i === 0 ? "M" : "L"} ${x(i)} ${y(d.tendencia)}`).join(" ");
+  const valuePath = data.map((d, i) => `${i === 0 ? "M" : "L"} ${x(i)} ${y(d.value)}`).join(" ");
+  const avgPath = data.map((d, i) => `${i === 0 ? "M" : "L"} ${x(i)} ${y(d.avg)}`).join(" ");
   const step = Math.max(1, Math.ceil(data.length / 5));
   return /* @__PURE__ */ React.createElement("svg", { viewBox: `0 0 ${W} ${H}`, width: "100%", height: 180, preserveAspectRatio: "xMidYMid meet" }, [0, 0.5, 1].map((t) => /* @__PURE__ */ React.createElement(
     "line",
@@ -1453,12 +1585,49 @@ function WeightTrendChart({ data }) {
       stroke: "#33383f",
       strokeDasharray: "2 4"
     }
-  )), /* @__PURE__ */ React.createElement("path", { d: pesoPath, fill: "none", stroke: "#6b7280", strokeWidth: "1.5" }), /* @__PURE__ */ React.createElement("path", { d: tendPath, fill: "none", stroke: "#e3b341", strokeWidth: "2.5" }), data.map((d, i) => /* @__PURE__ */ React.createElement("circle", { key: i, cx: x(i), cy: y(d.peso), r: "2", fill: "#6b7280" })), data.map(
+  )), /* @__PURE__ */ React.createElement("path", { d: valuePath, fill: "none", stroke: "#6b7280", strokeWidth: "1.5" }), /* @__PURE__ */ React.createElement("path", { d: avgPath, fill: "none", stroke: color || "#e3b341", strokeWidth: "2.5" }), data.map((d, i) => /* @__PURE__ */ React.createElement("circle", { key: i, cx: x(i), cy: y(d.value), r: "2", fill: "#6b7280" })), data.map(
     (d, i) => i % step === 0 ? /* @__PURE__ */ React.createElement("text", { key: i, x: x(i), y: H - 6, fontSize: "9", fill: "#767c85", textAnchor: "middle" }, d.label) : null
   ));
 }
-function Progress({ stats, profile, chartData, recommendations }) {
-  return /* @__PURE__ */ React.createElement("main", { className: "content" }, chartData.length >= 2 && /* @__PURE__ */ React.createElement("div", { className: "card chart-card" }, /* @__PURE__ */ React.createElement("span", { className: "field-label" }, "Tendencia de peso"), /* @__PURE__ */ React.createElement(WeightTrendChart, { data: chartData }), /* @__PURE__ */ React.createElement("div", { className: "legend-row" }, /* @__PURE__ */ React.createElement("span", null, /* @__PURE__ */ React.createElement("i", { className: "dot dot-grey" }), " peso diario"), /* @__PURE__ */ React.createElement("span", null, /* @__PURE__ */ React.createElement("i", { className: "dot dot-amber" }), " tendencia (7 registros)"))), stats.insufficient ? /* @__PURE__ */ React.createElement("div", { className: "card empty-card" }, /* @__PURE__ */ React.createElement("p", null, "Todav\xEDa no hay suficientes datos para calcular tu d\xE9ficit real. Carg\xE1 peso y calor\xEDas durante al menos 7-10 d\xEDas seguidos y ac\xE1 va a aparecer el c\xE1lculo.")) : /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("div", { className: "stat-grid" }, /* @__PURE__ */ React.createElement(
+function weekWindowAverage(sortedDates, entries, endDateISO, days) {
+  const dates = sortedDates.filter((d) => d <= endDateISO).slice(-days);
+  const avg = (key) => {
+    const vals = dates.map((d) => entries[d][key]).filter((v) => v != null);
+    return vals.length ? Math.round(vals.reduce((a, b) => a + b, 0) / vals.length * 10) / 10 : null;
+  };
+  const trainingDays = dates.filter((d) => entries[d].exercises && entries[d].exercises.length > 0).length;
+  return {
+    weight: avg("weight"),
+    calories: avg("calories"),
+    protein: avg("protein"),
+    steps: avg("steps"),
+    trainingDays,
+    daysLogged: dates.length
+  };
+}
+function WeekComparison({ sortedDates, entries }) {
+  const today = todayISO();
+  const sevenAgo = /* @__PURE__ */ new Date();
+  sevenAgo.setDate(sevenAgo.getDate() - 7);
+  const sevenAgoISO = sevenAgo.toISOString().slice(0, 10);
+  const thisWeek = weekWindowAverage(sortedDates, entries, today, 7);
+  const lastWeek = weekWindowAverage(sortedDates, entries, sevenAgoISO, 7);
+  if (thisWeek.daysLogged === 0 || lastWeek.daysLogged === 0) return null;
+  const rows = [
+    { label: "\u2696\uFE0F Peso promedio", key: "weight", unit: "kg", good: "down" },
+    { label: "\u{1F525} Calor\xEDas promedio", key: "calories", unit: "kcal", good: null },
+    { label: "\u{1F969} Prote\xEDna promedio", key: "protein", unit: "g", good: "up" },
+    { label: "\u{1F463} Pasos promedio", key: "steps", unit: "", good: "up" }
+  ];
+  return /* @__PURE__ */ React.createElement("div", { className: "card" }, /* @__PURE__ */ React.createElement("span", { className: "field-label" }, "Esta semana vs. semana pasada"), /* @__PURE__ */ React.createElement("div", { className: "measure-changes" }, rows.map((r) => {
+    if (thisWeek[r.key] == null || lastWeek[r.key] == null) return null;
+    const diff = Math.round((thisWeek[r.key] - lastWeek[r.key]) * 10) / 10;
+    const goodClass = r.good == null ? "" : diffIsGood(diff, r.good) ? "good" : diff === 0 ? "" : "bad";
+    return /* @__PURE__ */ React.createElement("div", { className: "change-row", key: r.key }, /* @__PURE__ */ React.createElement("span", null, r.label), /* @__PURE__ */ React.createElement("span", { className: goodClass }, thisWeek[r.key].toLocaleString("es"), " ", r.unit, diff !== 0 && /* @__PURE__ */ React.createElement("em", { style: { marginLeft: 6 } }, "(", diff > 0 ? "+" : "", diff.toLocaleString("es"), ")")));
+  }), /* @__PURE__ */ React.createElement("div", { className: "change-row" }, /* @__PURE__ */ React.createElement("span", null, "\u{1F3CB}\uFE0F D\xEDas entrenados"), /* @__PURE__ */ React.createElement("span", null, thisWeek.trainingDays, " vs ", lastWeek.trainingDays))));
+}
+function Progress({ stats, profile, chartData, stepsChartData, sortedDates, entries, recommendations }) {
+  return /* @__PURE__ */ React.createElement("main", { className: "content" }, chartData.length >= 2 && /* @__PURE__ */ React.createElement("div", { className: "card chart-card" }, /* @__PURE__ */ React.createElement("span", { className: "field-label" }, "Tendencia de peso"), /* @__PURE__ */ React.createElement(TrendChart, { data: chartData, color: "#e3b341" }), /* @__PURE__ */ React.createElement("div", { className: "legend-row" }, /* @__PURE__ */ React.createElement("span", null, /* @__PURE__ */ React.createElement("i", { className: "dot dot-grey" }), " peso diario"), /* @__PURE__ */ React.createElement("span", null, /* @__PURE__ */ React.createElement("i", { className: "dot dot-amber" }), " tendencia (7 registros)"))), stepsChartData.length >= 2 && /* @__PURE__ */ React.createElement("div", { className: "card chart-card" }, /* @__PURE__ */ React.createElement("span", { className: "field-label" }, "Tendencia de pasos"), /* @__PURE__ */ React.createElement(TrendChart, { data: stepsChartData, color: "#6fcf97" }), /* @__PURE__ */ React.createElement("div", { className: "legend-row" }, /* @__PURE__ */ React.createElement("span", null, /* @__PURE__ */ React.createElement("i", { className: "dot dot-grey" }), " pasos diarios"), /* @__PURE__ */ React.createElement("span", null, /* @__PURE__ */ React.createElement("i", { className: "dot", style: { background: "#6fcf97" } }), " tendencia (7 registros)"))), /* @__PURE__ */ React.createElement(WeekComparison, { sortedDates, entries }), stats.insufficient ? /* @__PURE__ */ React.createElement("div", { className: "card empty-card" }, /* @__PURE__ */ React.createElement("p", null, "Todav\xEDa no hay suficientes datos para calcular tu d\xE9ficit real. Carg\xE1 peso y calor\xEDas durante al menos 7-10 d\xEDas seguidos y ac\xE1 va a aparecer el c\xE1lculo.")) : /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("div", { className: "stat-grid" }, /* @__PURE__ */ React.createElement(
     StatCard,
     {
       label: "D\xE9ficit estimado",
@@ -2066,6 +2235,41 @@ input:focus { outline: 2px solid var(--amber); outline-offset: 1px; }
   color: var(--text-dim);
   border-top: 1px solid var(--border);
   padding-top: 8px;
+}
+.cycle-status-card {
+  align-items: center;
+  text-align: center;
+  gap: 8px;
+  background: linear-gradient(180deg, rgba(227,179,65,0.06), transparent);
+}
+.cycle-day-big {
+  font-size: 28px;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+}
+.cycle-phase-badge {
+  display: inline-block;
+  padding: 5px 14px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.phase-Menstrual { background: rgba(235,106,90,0.15); color: var(--bad); }
+.phase-Folicular { background: rgba(111,207,151,0.15); color: var(--good); }
+.phase-Ovulaci\xF3n { background: rgba(227,179,65,0.18); color: var(--amber); }
+.phase-L\xFAtea { background: rgba(107,114,128,0.25); color: #b8bec7; }
+.phase-Atrasada { background: rgba(235,106,90,0.1); color: var(--warn); }
+.cycle-sub-info { font-size: 12.5px; color: var(--text-dim); }
+.cycle-tip {
+  font-size: 12.5px;
+  color: var(--text);
+  background: var(--surface-alt);
+  border-radius: 8px;
+  padding: 9px 12px;
+  margin-top: 4px;
+  line-height: 1.4;
 }
 .history-detail {
   display: flex;
