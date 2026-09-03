@@ -406,6 +406,11 @@ function shortDate(iso) {
   const [y, m, d] = iso.split("-");
   return `${d}/${m}`;
 }
+function toNumber(v) {
+  if (v == null || v === "") return 0;
+  const n = parseFloat(String(v).replace(",", "."));
+  return isNaN(n) ? 0 : n;
+}
 function daysBetween(a, b) {
   return Math.round((new Date(b) - new Date(a)) / 864e5);
 }
@@ -606,7 +611,7 @@ function App() {
     );
     const clean = {
       date: editingDate,
-      weight: form.weight === "" ? null : parseFloat(form.weight),
+      weight: form.weight === "" ? null : toNumber(form.weight),
       calories: hasMeals ? totalCalories : null,
       protein: hasMeals ? totalProtein : null,
       meals: form.meals,
@@ -1081,7 +1086,7 @@ function EntryForm({
   const estimatedMinutes = totalSets > 0 ? Math.round(totalSets * 3) : 0;
   const usingEstimatedMinutes = form.minutes === "" && estimatedMinutes > 0;
   const effectiveMinutes = form.minutes !== "" ? parseInt(form.minutes, 10) : estimatedMinutes;
-  const weightForCalc = form.weight !== "" ? parseFloat(form.weight) : fallbackWeight;
+  const weightForCalc = form.weight !== "" ? toNumber(form.weight) : fallbackWeight;
   const bmr = computeBMR(weightForCalc, profile.heightCm, profile.age, profile.sex);
   const stepsCal = stepsCalories(form.steps === "" ? 0 : parseInt(form.steps, 10), weightForCalc);
   const trainCal = trainingCalories(effectiveMinutes, form.exercises, weightForCalc);
@@ -1133,7 +1138,7 @@ function EntryForm({
     if (!form.exercises.length) return [];
     const priorDates = sortedDates.filter((d) => d < date).sort();
     return form.exercises.map((ex) => {
-      const maxToday = Math.max(0, ...ex.sets.map((s) => Number(s.weight) || 0));
+      const maxToday = Math.max(0, ...ex.sets.map((s) => toNumber(s.weight)));
       if (maxToday === 0) return null;
       let prevMax = null;
       for (let i = priorDates.length - 1; i >= 0; i--) {
@@ -1141,7 +1146,7 @@ function EntryForm({
         if (!pe.exercises) continue;
         const match = pe.exercises.find((pex) => pex.name.trim().toLowerCase() === ex.name.trim().toLowerCase());
         if (match) {
-          const w = Math.max(0, ...match.sets.map((s) => Number(s.weight) || 0));
+          const w = Math.max(0, ...match.sets.map((s) => toNumber(s.weight)));
           if (w > 0) {
             prevMax = w;
             break;
@@ -1536,7 +1541,7 @@ function MeasurementsTab({ measurements, onSave }) {
   function handleSave() {
     const clean = { date: editingDate };
     MEASUREMENT_FIELDS.forEach((f) => {
-      clean[f.key] = form[f.key] === "" ? null : parseFloat(form[f.key]);
+      clean[f.key] = form[f.key] === "" ? null : toNumber(form[f.key]);
     });
     const next = { ...measurements, [editingDate]: clean };
     onSave(next);
@@ -1790,10 +1795,63 @@ function HistoryCard({ date, entry: e, profile, fallbackWeight, onEdit, onDelete
   }
   return /* @__PURE__ */ React.createElement("div", { className: "card history-item" }, /* @__PURE__ */ React.createElement("div", { className: "history-top" }, /* @__PURE__ */ React.createElement("span", { className: "history-date" }, shortDate(date)), /* @__PURE__ */ React.createElement("div", { className: "history-actions" }, /* @__PURE__ */ React.createElement("button", { className: "icon-btn", onClick: () => onEdit(date) }, /* @__PURE__ */ React.createElement(Pencil, { size: 15 })), /* @__PURE__ */ React.createElement("button", { className: "icon-btn danger", onClick: () => onDelete(date) }, /* @__PURE__ */ React.createElement(Trash2, { size: 15 })))), /* @__PURE__ */ React.createElement("div", { className: "history-grid", onClick: () => hasDetail && setExpanded((v) => !v) }, e.weight != null && /* @__PURE__ */ React.createElement("span", null, "\u2696\uFE0F ", e.weight, " kg"), e.calories != null && /* @__PURE__ */ React.createElement("span", null, "\u{1F525} ", e.calories, " kcal"), e.protein != null && /* @__PURE__ */ React.createElement("span", null, "\u{1F969} ", e.protein, " g"), e.meals && e.meals.length > 0 && /* @__PURE__ */ React.createElement("span", null, "\u{1F37D}\uFE0F ", e.meals.length, " comida", e.meals.length > 1 ? "s" : ""), e.steps != null && /* @__PURE__ */ React.createElement("span", null, "\u{1F463} ", e.steps.toLocaleString("es")), e.creatine && /* @__PURE__ */ React.createElement("span", null, "\u{1F48A} creatina"), e.exercises && e.exercises.length > 0 && /* @__PURE__ */ React.createElement("span", null, "\u{1F3CB}\uFE0F ", e.exercises.length, " ejercicio", e.exercises.length > 1 ? "s" : "", e.minutes ? ` \xB7 ${e.minutes} min` : ""), dailyBalance != null && /* @__PURE__ */ React.createElement("span", { className: dailyBalance >= 0 ? "balance-badge deficit" : "balance-badge surplus" }, dailyBalance >= 0 ? `\u2696\uFE0F d\xE9ficit -${dailyBalance}` : `\u2696\uFE0F super\xE1vit +${Math.abs(dailyBalance)}`), hasDetail && /* @__PURE__ */ React.createElement("span", { className: "detail-toggle" }, expanded ? "ocultar detalle \u25B2" : "ver detalle \u25BC")), expanded && e.meals && e.meals.length > 0 && /* @__PURE__ */ React.createElement("div", { className: "history-detail" }, e.meals.map((m) => /* @__PURE__ */ React.createElement("div", { className: "history-meal", key: m.id }, /* @__PURE__ */ React.createElement("div", { className: "history-meal-name" }, m.name), m.items.map((it) => /* @__PURE__ */ React.createElement("div", { className: "history-item-line", key: it.id }, /* @__PURE__ */ React.createElement("span", null, it.name, it.qty ? ` (${it.qty})` : ""), /* @__PURE__ */ React.createElement("span", null, it.calories, " kcal \xB7 ", it.protein, " g")))))), expanded && exercisesByGroup.length > 0 && /* @__PURE__ */ React.createElement("div", { className: "history-detail" }, exercisesByGroup.map(({ group, items }) => /* @__PURE__ */ React.createElement("div", { className: "history-meal", key: group }, /* @__PURE__ */ React.createElement("div", { className: "history-meal-name" }, group), items.map((ex) => /* @__PURE__ */ React.createElement("div", { className: "history-item-line", key: ex.id }, /* @__PURE__ */ React.createElement("span", null, ex.name), /* @__PURE__ */ React.createElement("span", null, ex.sets.map((s) => `${s.weight || "-"}x${s.reps || "-"}`).join(", "))))))), e.note && /* @__PURE__ */ React.createElement("div", { className: "history-note" }, e.note));
 }
+const BACKUP_KEYS = ["profile", "log-entries", "weekly-plan", "measurements", "cycle-data"];
+async function exportBackup() {
+  const bundle = {};
+  for (const k of BACKUP_KEYS) {
+    try {
+      const r = await window.storage.get(k, false);
+      if (r && r.value) bundle[k] = JSON.parse(r.value);
+    } catch (e) {
+    }
+  }
+  const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "bitacora-backup-" + todayISO() + ".json";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+async function importBackup(file) {
+  const text = await file.text();
+  const bundle = JSON.parse(text);
+  for (const k of Object.keys(bundle)) {
+    if (BACKUP_KEYS.includes(k)) {
+      await window.storage.set(k, JSON.stringify(bundle[k]), false);
+    }
+  }
+  window.location.reload();
+}
 function ProfileSheet({ profile, onClose, onSave }) {
   const [p, setP] = useState(profile);
+  const [backupMsg, setBackupMsg] = useState("");
+  const importInputRef = useRef(null);
   function set(key, value) {
     setP((prev) => ({ ...prev, [key]: value }));
+  }
+  async function handleExport() {
+    try {
+      await exportBackup();
+      setBackupMsg("Descargado \u2713");
+      setTimeout(() => setBackupMsg(""), 2e3);
+    } catch (e) {
+      setBackupMsg("No pudimos exportar. Prob\xE1 de nuevo.");
+    }
+  }
+  async function handleImportFile(file) {
+    if (!file) return;
+    const ok = window.confirm(
+      "Esto va a reemplazar los datos guardados en este navegador con los del archivo. \xBFContinuar?"
+    );
+    if (!ok) return;
+    try {
+      await importBackup(file);
+    } catch (e) {
+      setBackupMsg("No pudimos importar ese archivo.");
+    }
   }
   return /* @__PURE__ */ React.createElement("div", { className: "modal-backdrop", onClick: onClose }, /* @__PURE__ */ React.createElement("div", { className: "modal sheet", onClick: (e) => e.stopPropagation() }, /* @__PURE__ */ React.createElement("span", { className: "field-label" }, "Tus objetivos"), /* @__PURE__ */ React.createElement("label", { className: "field" }, /* @__PURE__ */ React.createElement("span", { className: "field-label" }, "Clave de API de Gemini (gratis)"), /* @__PURE__ */ React.createElement(
     "input",
@@ -1844,7 +1902,7 @@ function ProfileSheet({ profile, onClose, onSave }) {
     {
       inputMode: "decimal",
       value: p.targetWeight,
-      onChange: (e) => set("targetWeight", parseFloat(e.target.value) || 0)
+      onChange: (e) => set("targetWeight", toNumber(e.target.value))
     }
   ))), /* @__PURE__ */ React.createElement("div", { className: "field-row" }, /* @__PURE__ */ React.createElement("label", { className: "field" }, /* @__PURE__ */ React.createElement("span", { className: "field-label" }, "Prote\xEDna m\xEDn (g)"), /* @__PURE__ */ React.createElement(
     "input",
@@ -1897,7 +1955,22 @@ function ProfileSheet({ profile, onClose, onSave }) {
       value: p.trainingContext,
       onChange: (e) => set("trainingContext", e.target.value)
     }
-  ), /* @__PURE__ */ React.createElement("span", { className: "field-hint" }, "Esto se le pasa siempre a la Sugerencia IA en la pesta\xF1a Hoy, as\xED tiene en cuenta tus cargas actuales y cualquier molestia o lesi\xF3n antes de recomendar algo.")), /* @__PURE__ */ React.createElement("div", { className: "modal-actions" }, /* @__PURE__ */ React.createElement("button", { className: "ghost-btn", onClick: onClose }, "Cancelar"), /* @__PURE__ */ React.createElement("button", { className: "save-btn", style: { flex: 1 }, onClick: () => onSave(p) }, "Guardar"))));
+  ), /* @__PURE__ */ React.createElement("span", { className: "field-hint" }, "Esto se le pasa siempre a la Sugerencia IA en la pesta\xF1a Hoy, as\xED tiene en cuenta tus cargas actuales y cualquier molestia o lesi\xF3n antes de recomendar algo.")), /* @__PURE__ */ React.createElement("div", { className: "field" }, /* @__PURE__ */ React.createElement("span", { className: "field-label" }, "Copia de seguridad"), /* @__PURE__ */ React.createElement("span", { className: "field-hint" }, "Tus datos se guardan solo en este navegador \u2014 no se comparten autom\xE1ticamente entre Safari, Chrome u otros dispositivos. Export\xE1 un archivo para tener un respaldo, o para pasar tus datos a otro navegador."), /* @__PURE__ */ React.createElement("div", { className: "field-row", style: { marginTop: 8 } }, /* @__PURE__ */ React.createElement("button", { className: "ghost-btn", style: { flex: 1 }, onClick: handleExport }, "\u{1F4E4} Exportar datos"), /* @__PURE__ */ React.createElement("button", { className: "ghost-btn", style: { flex: 1 }, onClick: () => {
+    var _a;
+    return (_a = importInputRef.current) == null ? void 0 : _a.click();
+  } }, "\u{1F4E5} Importar datos")), /* @__PURE__ */ React.createElement(
+    "input",
+    {
+      ref: importInputRef,
+      type: "file",
+      accept: "application/json",
+      style: { display: "none" },
+      onChange: (e) => {
+        handleImportFile(e.target.files[0]);
+        e.target.value = "";
+      }
+    }
+  ), backupMsg && /* @__PURE__ */ React.createElement("span", { className: "field-hint", style: { color: "var(--good)" } }, backupMsg)), /* @__PURE__ */ React.createElement("div", { className: "modal-actions" }, /* @__PURE__ */ React.createElement("button", { className: "ghost-btn", onClick: onClose }, "Cancelar"), /* @__PURE__ */ React.createElement("button", { className: "save-btn", style: { flex: 1 }, onClick: () => onSave(p) }, "Guardar"))));
 }
 const CSS = `
 :root {
